@@ -26,6 +26,28 @@ local SuguruBoardWidget   = lrequire("board_widget")
 
 local DeviceScreen = Device.screen
 
+local GAME_RULES_EN = _([[
+Suguru — Rules
+
+Fill every cell of the grid with a number so that:
+
+1. Each outlined group of N cells contains every number from 1 to N exactly once.
+2. No two cells containing the same number may touch each other — not even diagonally.
+
+Given clue numbers are fixed. Use the group sizes and adjacency rules to deduce the remaining numbers.
+]])
+
+local GAME_RULES_FR = [[
+Suguru — Règles
+
+Remplissez chaque case de la grille avec un chiffre de sorte que :
+
+1. Chaque groupe délimité de N cases contienne tous les chiffres de 1 à N exactement une fois.
+2. Deux cases contenant le même chiffre ne peuvent pas se toucher — même en diagonale.
+
+Les chiffres indices sont fixes. Utilisez la taille des groupes et les règles d'adjacence pour déduire les autres chiffres.
+]]
+
 local SuguruScreen = ScreenBase:extend{}
 
 function SuguruScreen:init()
@@ -76,6 +98,7 @@ function SuguruScreen:buildLayout()
               callback = function() self:openSizeMenu() end },
             { id = "diff_button", text = self:getDiffButtonText(),
               callback = function() self:openDifficultyMenu() end },
+            self:makeRulesButtonConfig(GAME_RULES_EN, GAME_RULES_FR),
             self:makeCloseButtonConfig(),
         }},
     }
