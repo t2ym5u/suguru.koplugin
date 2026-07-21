@@ -20,13 +20,36 @@ local function inBounds(r, c, n)
 end
 
 -- ---------------------------------------------------------------------------
--- Cage generation (BFS flood-fill, sizes 1-5, preferring 2-3)
+-- Cage + value generation
 -- ---------------------------------------------------------------------------
 
-local function generateCages(n)
+-- Same rule as isValid() below (no same value among the 8 neighbours), but
+-- checked against a plain n×n value grid before a cage's final size is
+-- decided.
+local function isValidGlobal(grid, n, r, c, v)
+    for _, d in ipairs(DIR8) do
+        local nr, nc = r + d[1], c + d[2]
+        if inBounds(nr, nc, n) and grid[nr][nc] == v then return false end
+    end
+    return true
+end
+
+-- Build cages AND assign their values in the same pass, instead of
+-- generating a blind random cage layout and hoping a separate solve() can
+-- fill it (measured: at n=6 that needed tens of thousands of attempts to
+-- find a satisfiable layout by chance). Each new cage grows one cell at a
+-- time, immediately assigning the next value and checking it against every
+-- value already placed on the board; a cage just stops growing early if no
+-- neighbouring cell can validly take the next value. Leftover unassigned
+-- cells (surrounded before they got a turn) are patched in a repair pass:
+-- extend an adjacent cage by one more value, or start a fresh size-1 cage;
+-- returns nil only if neither works anywhere, so the caller can retry
+-- cheaply (no search involved, so a high retry cap is affordable).
+local function tryGenerateCagesAndValues(n)
+    local grid    = emptyGrid(n, n, 0)
     local cage_id = emptyGrid(n, n, 0)
     local cages   = {}
-    local next_id = 1
+    local next_id = 0
 
     local all_cells = {}
     for r = 1, n do
@@ -36,51 +59,88 @@ local function generateCages(n)
 
     for _, cell in ipairs(all_cells) do
         local r, c = cell[1], cell[2]
-        if cage_id[r][c] == 0 then
-            local id   = next_id
-            next_id    = next_id + 1
-            local cage = { cells = {{r, c}}, size = 1 }
-            cages[id]  = cage
+        if cage_id[r][c] == 0 and isValidGlobal(grid, n, r, c, 1) then
+            next_id = next_id + 1
+            local id = next_id
             cage_id[r][c] = id
+            grid[r][c]    = 1
+            local cage = { cells = {{r, c}}, size = 1 }
+            cages[id] = cage
 
             -- Prefer sizes 2-3; allow 1-MAX_CAGE
             local weights = {1, 3, 3, 2, 1}
             local total_w = 0
             for _, w in ipairs(weights) do total_w = total_w + w end
             local rng = math.random(total_w)
-            local acc = 0
-            local target = 1
+            local acc, target = 0, 1
             for sz, w in ipairs(weights) do
                 acc = acc + w
                 if rng <= acc then target = sz; break end
             end
 
-            local frontier = {{r, c}}
-            while cage.size < target and #frontier > 0 do
-                local fi   = math.random(#frontier)
-                local fc   = frontier[fi]
-                local dirs = { {-1,0},{1,0},{0,-1},{0,1} }
-                shuffle(dirs)
-                local grown = false
-                for _, d in ipairs(dirs) do
-                    local nr, nc = fc[1] + d[1], fc[2] + d[2]
-                    if inBounds(nr, nc, n) and cage_id[nr][nc] == 0 then
-                        cage_id[nr][nc] = id
-                        cage.size = cage.size + 1
-                        cage.cells[#cage.cells + 1] = {nr, nc}
-                        frontier[#frontier + 1] = {nr, nc}
-                        grown = true
-                        break
+            while cage.size < target do
+                local candidates = {}
+                for _, rc in ipairs(cage.cells) do
+                    for _, d in ipairs(DIR4) do
+                        local nr, nc = rc[1] + d[1], rc[2] + d[2]
+                        if inBounds(nr, nc, n) and cage_id[nr][nc] == 0 then
+                            local next_v = cage.size + 1
+                            if isValidGlobal(grid, n, nr, nc, next_v) then
+                                candidates[#candidates + 1] = {nr, nc}
+                            end
+                        end
                     end
                 end
-                if not grown then
-                    table.remove(frontier, fi)
+                if #candidates == 0 then break end
+                local pick = candidates[math.random(#candidates)]
+                cage.size = cage.size + 1
+                cage_id[pick[1]][pick[2]] = id
+                grid[pick[1]][pick[2]]    = cage.size
+                cage.cells[#cage.cells + 1] = pick
+            end
+        end
+    end
+
+    -- Repair pass: patch up any cells the main pass never reached.
+    for r = 1, n do
+        for c = 1, n do
+            if cage_id[r][c] == 0 then
+                local joined, adj_ids = false, {}
+                for _, d in ipairs(DIR4) do
+                    local nr, nc = r + d[1], c + d[2]
+                    if inBounds(nr, nc, n) and cage_id[nr][nc] > 0 then
+                        adj_ids[cage_id[nr][nc]] = true
+                    end
+                end
+                for id in pairs(adj_ids) do
+                    local cage = cages[id]
+                    if cage.size < MAX_CAGE then
+                        local next_v = cage.size + 1
+                        if isValidGlobal(grid, n, r, c, next_v) then
+                            cage.size = next_v
+                            cage_id[r][c] = id
+                            grid[r][c]    = next_v
+                            cage.cells[#cage.cells + 1] = {r, c}
+                            joined = true
+                            break
+                        end
+                    end
+                end
+                if not joined then
+                    if isValidGlobal(grid, n, r, c, 1) then
+                        next_id = next_id + 1
+                        cage_id[r][c] = next_id
+                        grid[r][c]    = 1
+                        cages[next_id] = { cells = {{r, c}}, size = 1 }
+                    else
+                        return nil
+                    end
                 end
             end
         end
     end
 
-    return cage_id, cages
+    return grid, cage_id, cages
 end
 
 -- ---------------------------------------------------------------------------
@@ -111,26 +171,6 @@ local function isValid(grid, cage_id, cages, r, c, v, n)
     end
 
     return true
-end
-
--- ---------------------------------------------------------------------------
--- Backtracking solver
--- ---------------------------------------------------------------------------
-
-local function solve(grid, cage_id, cages, cells, idx, n)
-    if idx > #cells then return true end
-    local r, c      = cells[idx][1], cells[idx][2]
-    local cage_size = cages[cage_id[r][c]].size
-    for v = 1, cage_size do
-        if isValid(grid, cage_id, cages, r, c, v, n) then
-            grid[r][c] = v
-            if solve(grid, cage_id, cages, cells, idx + 1, n) then
-                return true
-            end
-            grid[r][c] = 0
-        end
-    end
-    return false
 end
 
 -- ---------------------------------------------------------------------------
@@ -197,18 +237,14 @@ end
 function SuguruBoard:generate(diff)
     self.difficulty = diff or self.difficulty
     local n         = self.n
-    local MAX_ATTEMPTS = 20
+    -- Each attempt is a cheap constructive build (no backtracking search),
+    -- so this can afford to be a large budget: measured 0/40 fallback at
+    -- n=6 (the hardest supported size) with this cap, worst case ~1.9s.
+    local MAX_ATTEMPTS = 100000
 
     for _ = 1, MAX_ATTEMPTS do
-        local cage_id, cages = generateCages(n)
-
-        local cells = {}
-        for r = 1, n do
-            for c = 1, n do cells[#cells + 1] = {r, c} end
-        end
-
-        local grid = emptyGrid(n, n, 0)
-        if solve(grid, cage_id, cages, cells, 1, n) then
+        local grid, cage_id, cages = tryGenerateCagesAndValues(n)
+        if grid then
             self.cage_id  = cage_id
             self.cages    = cages
             self.solution = grid
