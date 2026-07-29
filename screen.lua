@@ -7,6 +7,7 @@ local function lrequire(name)
     return package.loaded[key]
 end
 
+local Button          = require("ui/widget/button")
 local ButtonTable     = require("ui/widget/buttontable")
 local Device          = require("device")
 local FrameContainer  = require("ui/widget/container/framecontainer")
@@ -97,21 +98,23 @@ function SuguruScreen:buildLayout()
         }
     end)
 
-    -- Digit buttons 1-MAX_CAGE
+    -- Digit buttons 1-MAX_CAGE, drawn as real bordered buttons
     local max_cage  = SuguruBoard.MAX_CAGE
-    local digit_row = {}
+    local digit_btn_width = math.floor(button_width / max_cage)
+    local digit_buttons = HorizontalGroup:new{}
     for d = 1, max_cage do
         local dv = d
-        digit_row[#digit_row + 1] = {
-            text     = tostring(dv),
-            callback = function() self:onDigitKey(dv) end,
+        local digit_btn = Button:new{
+            text       = tostring(dv),
+            width      = digit_btn_width,
+            margin     = Size.margin.small,
+            bordersize = Size.border.button,
+            radius     = Size.radius.button,
+            padding    = Size.padding.buttontable,
+            callback   = function() self:onDigitKey(dv) end,
         }
+        table.insert(digit_buttons, digit_btn)
     end
-    local digit_buttons = ButtonTable:new{
-        shrink_unneeded_width = true,
-        width   = button_width,
-        buttons = { digit_row },
-    }
 
     local bottom_buttons = ButtonTable:new{
         shrink_unneeded_width = true,
