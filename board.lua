@@ -177,7 +177,77 @@ end
 -- Clue removal
 -- ---------------------------------------------------------------------------
 
-local function removeClues(solution, n, difficulty)
+-- Counts solutions (up to `limit`) of the region+adjacency instance given
+-- the current puzzle's fixed cells, using MRV cell ordering. Returns
+-- (solutions_found, exhausted); exhausted=true means node_budget was hit
+-- before the search concluded, so the count isn't proof. Mirrors
+-- sudokukiller.koplugin/board.lua's countCageSolutions.
+local NODE_BUDGET_UNIQUENESS = 200000
+
+local function countSolutions(puzzle, cage_id, cages, n, limit, node_budget)
+    local grid = {}
+    for r = 1, n do
+        grid[r] = {}
+        for c = 1, n do grid[r][c] = puzzle[r][c] end
+    end
+
+    local solutions, nodes, exhausted = 0, 0, false
+
+    local function isValid(r, c, v)
+        local id = cage_id[r][c]
+        local cage_size = cages[id].size
+        if v > cage_size then return false end
+        for _, cell in ipairs(cages[id].cells) do
+            local cr, cc = cell[1], cell[2]
+            if not (cr == r and cc == c) and grid[cr][cc] == v then return false end
+        end
+        for _, d in ipairs(DIR8) do
+            local nr, nc = r + d[1], c + d[2]
+            if inBounds(nr, nc, n) and grid[nr][nc] == v then return false end
+        end
+        return true
+    end
+
+    local empties = {}
+    for r = 1, n do for c = 1, n do if grid[r][c] == 0 then empties[#empties + 1] = { r = r, c = c } end end end
+
+    local function candidatesFor(r, c)
+        local cage_size = cages[cage_id[r][c]].size
+        local cands = {}
+        for v = 1, cage_size do if isValid(r, c, v) then cands[#cands + 1] = v end end
+        return cands
+    end
+
+    local function search(depth)
+        if solutions >= limit or exhausted then return end
+        nodes = nodes + 1
+        if nodes > node_budget then exhausted = true; return end
+        if depth > #empties then solutions = solutions + 1; return end
+        local best_idx, best_cands, best_len = nil, nil, 1000
+        for i, cell in ipairs(empties) do
+            if grid[cell.r][cell.c] == 0 then
+                local cands = candidatesFor(cell.r, cell.c)
+                if #cands < best_len then
+                    best_len, best_cands, best_idx = #cands, cands, i
+                    if best_len <= 1 then break end
+                end
+            end
+        end
+        if best_idx == nil then solutions = solutions + 1; return end
+        if best_len == 0 then return end
+        local cell = empties[best_idx]
+        for _, v in ipairs(best_cands) do
+            grid[cell.r][cell.c] = v
+            search(depth + 1)
+            grid[cell.r][cell.c] = 0
+            if solutions >= limit or exhausted then return end
+        end
+    end
+    search(1)
+    return solutions, exhausted
+end
+
+local function removeClues(solution, cage_id, cages, n, difficulty)
     local keep_ratio
     if     difficulty == "easy"   then keep_ratio = 0.55
     elseif difficulty == "hard"   then keep_ratio = 0.20
@@ -189,20 +259,32 @@ local function removeClues(solution, n, difficulty)
         for c = 1, n do puzzle[r][c] = solution[r][c] end
     end
 
+    -- Dig cells one at a time (like sudoku-common's hole-digging),
+    -- verifying with countSolutions after each tentative removal and
+    -- putting the cell back if that broke uniqueness -- the old "just
+    -- remove a fraction of cells randomly" approach never checked this
+    -- (see docs/generator_robustness_audit.md's Tier 2 table: measured
+    -- severe ambiguity, only Easy ever produced a unique puzzle, and
+    -- rarely).
     local removable = {}
     for r = 1, n do
         for c = 1, n do removable[#removable + 1] = {r, c} end
     end
     shuffle(removable)
 
-    local total   = n * n
-    local to_keep = math.floor(total * keep_ratio)
-    local kept    = 0
+    local total      = n * n
+    local target_remove = total - math.floor(total * keep_ratio)
+    local removed = 0
     for _, cell in ipairs(removable) do
-        if kept < to_keep then
-            kept = kept + 1
+        if removed >= target_remove then break end
+        local r, c = cell[1], cell[2]
+        local saved = puzzle[r][c]
+        puzzle[r][c] = 0
+        local solutions, exhausted = countSolutions(puzzle, cage_id, cages, n, 2, NODE_BUDGET_UNIQUENESS)
+        if not exhausted and solutions == 1 then
+            removed = removed + 1
         else
-            puzzle[cell[1]][cell[2]] = 0
+            puzzle[r][c] = saved
         end
     end
     return puzzle
@@ -248,7 +330,7 @@ function SuguruBoard:generate(diff)
             self.cage_id  = cage_id
             self.cages    = cages
             self.solution = grid
-            self.puzzle   = removeClues(grid, n, self.difficulty)
+            self.puzzle   = removeClues(grid, cage_id, cages, n, self.difficulty)
             self.user     = emptyGrid(n, n, 0)
             self.wrong    = emptyGrid(n, n, false)
             for r = 1, n do
