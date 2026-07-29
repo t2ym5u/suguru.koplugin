@@ -3,5 +3,5 @@ return {
     name        = "suguru",
     fullname    = _("Suguru"),
     description = _("Fill regions with non-repeating numbers"),
-    version     = "1.1.9",
+    version     = "1.1.10",
 }
