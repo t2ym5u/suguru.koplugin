@@ -16,7 +16,7 @@ local CAGE_COLORS = {
     Blitbuffer.COLOR_WHITE,
     Blitbuffer.COLOR_GRAY_E,
     Blitbuffer.COLOR_GRAY_D,
-    Blitbuffer.COLOR_GRAY_C,
+    Blitbuffer.COLOR_LIGHT_GRAY,
     Blitbuffer.COLOR_GRAY_B,
 }
 local NUM_CAGE_COLORS = #CAGE_COLORS
@@ -25,7 +25,7 @@ local C_BG       = Blitbuffer.COLOR_WHITE
 local C_LINE     = Blitbuffer.COLOR_BLACK
 local C_THIN     = Blitbuffer.COLOR_GRAY_9
 local C_SEL_BG   = Blitbuffer.COLOR_GRAY_D
-local C_WRONG_BG = Blitbuffer.COLOR_GRAY_A
+local C_WRONG_BG = Blitbuffer.COLOR_GRAY
 local C_NUM      = Blitbuffer.COLOR_BLACK
 local C_USER_NUM = Blitbuffer.COLOR_GRAY_4
 
