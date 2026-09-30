@@ -4,7 +4,7 @@ A Suguru puzzle plugin for [KOReader](https://github.com/koreader/koreader).
 
 ## Screenshot
 
-*(Screenshot to be added.)*
+![Screenshot](images/suguru.png)
 
 ## Rules
 
