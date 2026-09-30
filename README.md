@@ -16,6 +16,7 @@ Fill every cell so each outlined group of size N contains 1–N exactly once. Id
 - **Three difficulty levels** — Easy, Medium, Hard
 - **Group highlighting** — outlined cages are clearly shown
 - **Check** — highlights adjacency or group violations
+- **Hint** — two taps: the first says which cell is about to give, the second acts on it. A cell that contradicts the solution is always reported before a fresh one is revealed
 - **Auto-save** — puzzle state saved and restored on next launch
 
 ## Installation
