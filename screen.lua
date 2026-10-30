@@ -7,9 +7,6 @@ local function lrequire(name)
     return package.loaded[key]
 end
 
-local Button          = require("ui/widget/button")
-local ButtonTable     = require("ui/widget/buttontable")
-local Device          = require("device")
 local FrameContainer  = require("ui/widget/container/framecontainer")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan  = require("ui/widget/horizontalspan")
@@ -25,8 +22,6 @@ local MenuHelper          = require("menu_helper")
 local SuguruBoard         = lrequire("board")
 local SuguruBoardWidget   = lrequire("board_widget")
 
-local DeviceScreen = Device.screen
-
 local GAME_RULES_EN = _([[
 Suguru — Rules
 
@@ -36,6 +31,8 @@ Fill every cell of the grid with a number so that:
 2. No two cells containing the same number may touch each other — not even diagonally.
 
 Given clue numbers are fixed. Use the group sizes and adjacency rules to deduce the remaining numbers.
+
+Tap a cell to select it, then tap a digit to fill it in. Long-press a cell to clear it.
 ]])
 
 local GAME_RULES_FR = [[
@@ -47,6 +44,8 @@ Remplissez chaque case de la grille avec un chiffre de sorte que :
 2. Deux cases contenant le même chiffre ne peuvent pas se toucher — même en diagonale.
 
 Les chiffres indices sont fixes. Utilisez la taille des groupes et les règles d'adjacence pour déduire les autres chiffres.
+
+Appuyez sur une case pour la sélectionner, puis sur un chiffre pour la remplir. Appui long sur une case pour l'effacer.
 ]]
 
 local SuguruScreen = ScreenBase:extend{}
@@ -68,28 +67,7 @@ function SuguruScreen:serializeState()
 end
 
 function SuguruScreen:buildLayout()
-    local sw           = DeviceScreen:getWidth()
     local is_landscape = self:isLandscape()
-
-    self.board_widget = SuguruBoardWidget:new{
-        board         = self.board,
-        onCellTap_cb  = function(r, c) self:onCellTap(r, c) end,
-        onCellHold_cb = function(r, c) self:onCellHold(r, c) end,
-    }
-
-    local board_frame = FrameContainer:new{
-        padding = Size.padding.large,
-        margin  = Size.margin.default,
-        self.board_widget,
-    }
-
-    local board_frame_size  = self.board_widget.size + (Size.padding.large + Size.margin.default) * 2
-    local right_panel_width = sw - board_frame_size - Size.span.horizontal_default
-    local button_width = is_landscape
-        and math.max(right_panel_width - Size.span.horizontal_default, 100)
-        or  math.floor(sw * 0.9)
-
-    self.status_text:setMaxWidth(is_landscape and button_width or board_frame_size)
 
     local title_bar = self:buildTitleBar(_("Suguru"), function()
         return {
@@ -100,64 +78,61 @@ function SuguruScreen:buildLayout()
         }
     end)
 
-    -- Digit buttons 1-MAX_CAGE, drawn as real bordered buttons
-    local max_cage  = SuguruBoard.MAX_CAGE
-    local digit_btn_width = math.floor(button_width / max_cage)
-    local digit_buttons = HorizontalGroup:new{}
-    for d = 1, max_cage do
+    -- Digit pad 1..MAX_CAGE
+    local keys = {}
+    for d = 1, SuguruBoard.MAX_CAGE do
         local dv = d
-        local digit_btn = Button:new{
-            text       = tostring(dv),
-            width      = digit_btn_width,
-            margin     = Size.margin.small,
-            bordersize = Size.border.button,
-            radius     = Size.radius.button,
-            padding    = Size.padding.buttontable,
-            callback   = function() self:onDigitKey(dv) end,
-        }
-        table.insert(digit_buttons, digit_btn)
+        keys[#keys + 1] = { id = "digit_" .. d, text = tostring(d),
+                            callback = function() self:onDigitKey(dv) end }
     end
+    local number_pad = self:buildNumberPad(keys)
 
-    local bottom_buttons = ButtonTable:new{
-        shrink_unneeded_width = true,
-        width   = button_width,
-        buttons = {{
-            { text = _("Erase"),  callback = function() self:onErase() end },
-            { text = _("Check"),  callback = function() self:onCheck() end },
-            { text = _("Hint"), callback = function() self:onHint() end },
-            { text = _("Undo"),   callback = function() self:onUndo() end },
-        }},
+    -- Bottom bar
+    local action_bar = self:buildActionBar({
+        { text = _("Erase"), callback = function() self:onErase() end },
+        { text = _("Check"), callback = function() self:onCheck() end },
+        { text = _("Hint"),  callback = function() self:onHint() end },
+        { text = _("Undo"),  callback = function() self:onUndo() end },
+    })
+
+    self.status_text:setMaxWidth(self:getControlsWidth())
+    local controls = VerticalGroup:new{
+        align = "center",
+        self.status_text,
+        VerticalSpan:new{ width = Size.span.vertical_large },
+        number_pad,
+        VerticalSpan:new{ width = Size.span.vertical_default },
+        action_bar,
     }
 
-    local footer = VerticalGroup:new{
-        align = "center",
-        digit_buttons,
-        VerticalSpan:new{ width = Size.span.vertical_large },
-        bottom_buttons,
+    -- The widget draws its own outer border, so the frame only pads.
+    local frame_pad = Size.padding.large
+    local budget_w, budget_h = self:getBoardBudget(title_bar, controls)
+    self.board_widget = SuguruBoardWidget:new{
+        max_size       = math.min(budget_w, budget_h) - 2 * frame_pad,
+        board          = self.board,
+        selected       = self.selected,
+        onCellTap_cb   = function(r, c) self:onCellTap(r, c) end,
+        onCellHold_cb  = function(r, c) self:onCellHold(r, c) end,
+    }
+    local board_frame = FrameContainer:new{
+        padding    = frame_pad,
+        margin     = 0,
+        bordersize = 0,
+        self.board_widget,
     }
 
     if is_landscape then
-        local right_panel = VerticalGroup:new{
-            align = "center",
-            self.status_text,
-            VerticalSpan:new{ width = Size.span.vertical_large },
-            footer,
-        }
         local content = HorizontalGroup:new{
-            align  = "center",
+            align = "center",
             board_frame,
-            HorizontalSpan:new{ width = Size.span.horizontal_default },
-            right_panel,
+            HorizontalSpan:new{ width = self:getGutter() },
+            controls,
         }
         self:buildLandscapeLayout(title_bar, content)
     else
-        local content = VerticalGroup:new{
-            align = "center",
-            board_frame,
-            VerticalSpan:new{ width = Size.span.vertical_large },
-            self.status_text,
-        }
-        self:buildPortraitLayout(title_bar, content, footer)
+        self:buildPortraitLayout(title_bar, board_frame,
+            VerticalGroup:new{ align = "center", controls, VerticalSpan:new{ width = self:getGutter() } })
     end
     self:updateStatus()
 end
@@ -239,7 +214,7 @@ function SuguruScreen:openSizeMenu()
         sizes[#sizes + 1] = { id = sz, text = sz .. "\xC3\x97" .. sz }
     end
     MenuHelper.openSizeMenu{
-        title     = _("Select grid size"),
+        title     = _("Select size"),
         sizes     = sizes,
         current   = self.plugin:getSetting("grid_n", SuguruBoard.DEFAULT_N),
         parent    = self,
@@ -277,9 +252,12 @@ function SuguruScreen:updateStatus(msg)
         local n     = self.board.n
         local diff  = self.plugin:getSetting("difficulty", "medium")
         local label = MenuHelper.DIFFICULTY_LABELS[diff] or diff
-        status = T(_("%1\xC3\x97%2 \xC2\xB7 %3 \xC2\xB7 Empty: %4"), n, n, label, empty)
+        status = self:joinStatus(T("%1×%2", n, n), label, T(_("Empty: %1"), empty))
     end
     ScreenBase.updateStatus(self, status)
+    -- Every move, hint, undo and reveal ends with a status update, so this
+    -- is where the bar learns that the round ended (or was undone).
+    self:refreshActionBar()
 end
 
 function SuguruScreen:getSizeButtonText()
@@ -290,7 +268,12 @@ end
 function SuguruScreen:getDiffButtonText()
     local diff  = self.plugin:getSetting("difficulty", "medium")
     local label = MenuHelper.DIFFICULTY_LABELS[diff] or diff
-    return T(_("Diff: %1"), label)
+    return T(_("Difficulty: %1"), label)
+end
+
+-- won is saved with the board.
+function SuguruScreen:isRoundOver()
+    return self.board.won
 end
 
 return SuguruScreen
