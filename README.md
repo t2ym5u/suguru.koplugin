@@ -34,7 +34,7 @@ Fill every cell so each outlined group of size N contains 1–N exactly once. Id
 | Enter a number | Tap the digit button |
 | Erase a cell | Tap **Erase** |
 | Check progress | Tap **Check** |
-| New puzzle | Tap **New** |
+| New puzzle | Tap **New game** |
 | Show rules | Tap **Rules** |
 
 ## License
