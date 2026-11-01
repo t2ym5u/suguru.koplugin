@@ -12,8 +12,8 @@ Fill every cell so each outlined group of size N contains 1–N exactly once. Id
 
 ## Features
 
-- **Multiple grid sizes**
-- **Three difficulty levels** — Easy, Medium, Hard
+- **Grid sizes from 5×5 to 8×8**
+- **Three difficulty levels** — Easy, Medium, Hard. Every puzzle can be solved by deduction, without guessing. Easy and Medium need only the basic rules; Hard needs reasoning about a whole region
 - **Group highlighting** — outlined cages are clearly shown
 - **Check** — highlights adjacency or group violations
 - **Hint** — two taps: the first says which cell is about to give, the second acts on it. A cell that contradicts the solution is always reported before a fresh one is revealed
@@ -39,4 +39,4 @@ Fill every cell so each outlined group of size N contains 1–N exactly once. Id
 
 ## License
 
-GPL-3.0 — see [LICENSE](LICENSE).
+GPL-3.0 — see [LICENSE](LICENSE). Third-party credits are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

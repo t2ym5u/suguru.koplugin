@@ -1,147 +1,22 @@
 local grid_utils = require("grid_utils")
 local UndoStack  = require("undo_stack")
 local Hint      = require("hint")
+local Logic     = require("suguru_logic")
 
 local emptyGrid = grid_utils.emptyGrid
-local shuffle   = grid_utils.shuffle
 
 -- ---------------------------------------------------------------------------
 -- Constants
 -- ---------------------------------------------------------------------------
 
-local SIZES     = { 5, 6 }
+local SIZES     = { 5, 6, 7, 8 }
 local DEFAULT_N = 5
 local MAX_CAGE  = 5   -- cages hold 1..MAX_CAGE cells
 
-local DIR4 = { {-1,0},{1,0},{0,-1},{0,1} }
 local DIR8 = { {-1,-1},{-1,0},{-1,1},{0,-1},{0,1},{1,-1},{1,0},{1,1} }
 
 local function inBounds(r, c, n)
     return r >= 1 and r <= n and c >= 1 and c <= n
-end
-
--- ---------------------------------------------------------------------------
--- Cage + value generation
--- ---------------------------------------------------------------------------
-
--- Same rule as isValid() below (no same value among the 8 neighbours), but
--- checked against a plain n×n value grid before a cage's final size is
--- decided.
-local function isValidGlobal(grid, n, r, c, v)
-    for _, d in ipairs(DIR8) do
-        local nr, nc = r + d[1], c + d[2]
-        if inBounds(nr, nc, n) and grid[nr][nc] == v then return false end
-    end
-    return true
-end
-
--- Build cages AND assign their values in the same pass, instead of
--- generating a blind random cage layout and hoping a separate solve() can
--- fill it (measured: at n=6 that needed tens of thousands of attempts to
--- find a satisfiable layout by chance). Each new cage grows one cell at a
--- time, immediately assigning the next value and checking it against every
--- value already placed on the board; a cage just stops growing early if no
--- neighbouring cell can validly take the next value. Leftover unassigned
--- cells (surrounded before they got a turn) are patched in a repair pass:
--- extend an adjacent cage by one more value, or start a fresh size-1 cage;
--- returns nil only if neither works anywhere, so the caller can retry
--- cheaply (no search involved, so a high retry cap is affordable).
-local function tryGenerateCagesAndValues(n)
-    local grid    = emptyGrid(n, n, 0)
-    local cage_id = emptyGrid(n, n, 0)
-    local cages   = {}
-    local next_id = 0
-
-    local all_cells = {}
-    for r = 1, n do
-        for c = 1, n do all_cells[#all_cells + 1] = {r, c} end
-    end
-    shuffle(all_cells)
-
-    for _, cell in ipairs(all_cells) do
-        local r, c = cell[1], cell[2]
-        if cage_id[r][c] == 0 and isValidGlobal(grid, n, r, c, 1) then
-            next_id = next_id + 1
-            local id = next_id
-            cage_id[r][c] = id
-            grid[r][c]    = 1
-            local cage = { cells = {{r, c}}, size = 1 }
-            cages[id] = cage
-
-            -- Prefer sizes 2-3; allow 1-MAX_CAGE
-            local weights = {1, 3, 3, 2, 1}
-            local total_w = 0
-            for _, w in ipairs(weights) do total_w = total_w + w end
-            local rng = math.random(total_w)
-            local acc, target = 0, 1
-            for sz, w in ipairs(weights) do
-                acc = acc + w
-                if rng <= acc then target = sz; break end
-            end
-
-            while cage.size < target do
-                local candidates = {}
-                for _, rc in ipairs(cage.cells) do
-                    for _, d in ipairs(DIR4) do
-                        local nr, nc = rc[1] + d[1], rc[2] + d[2]
-                        if inBounds(nr, nc, n) and cage_id[nr][nc] == 0 then
-                            local next_v = cage.size + 1
-                            if isValidGlobal(grid, n, nr, nc, next_v) then
-                                candidates[#candidates + 1] = {nr, nc}
-                            end
-                        end
-                    end
-                end
-                if #candidates == 0 then break end
-                local pick = candidates[math.random(#candidates)]
-                cage.size = cage.size + 1
-                cage_id[pick[1]][pick[2]] = id
-                grid[pick[1]][pick[2]]    = cage.size
-                cage.cells[#cage.cells + 1] = pick
-            end
-        end
-    end
-
-    -- Repair pass: patch up any cells the main pass never reached.
-    for r = 1, n do
-        for c = 1, n do
-            if cage_id[r][c] == 0 then
-                local joined, adj_ids = false, {}
-                for _, d in ipairs(DIR4) do
-                    local nr, nc = r + d[1], c + d[2]
-                    if inBounds(nr, nc, n) and cage_id[nr][nc] > 0 then
-                        adj_ids[cage_id[nr][nc]] = true
-                    end
-                end
-                for id in pairs(adj_ids) do
-                    local cage = cages[id]
-                    if cage.size < MAX_CAGE then
-                        local next_v = cage.size + 1
-                        if isValidGlobal(grid, n, r, c, next_v) then
-                            cage.size = next_v
-                            cage_id[r][c] = id
-                            grid[r][c]    = next_v
-                            cage.cells[#cage.cells + 1] = {r, c}
-                            joined = true
-                            break
-                        end
-                    end
-                end
-                if not joined then
-                    if isValidGlobal(grid, n, r, c, 1) then
-                        next_id = next_id + 1
-                        cage_id[r][c] = next_id
-                        grid[r][c]    = 1
-                        cages[next_id] = { cells = {{r, c}}, size = 1 }
-                    else
-                        return nil
-                    end
-                end
-            end
-        end
-    end
-
-    return grid, cage_id, cages
 end
 
 -- ---------------------------------------------------------------------------
@@ -175,123 +50,6 @@ local function isValid(grid, cage_id, cages, r, c, v, n)
 end
 
 -- ---------------------------------------------------------------------------
--- Clue removal
--- ---------------------------------------------------------------------------
-
--- Counts solutions (up to `limit`) of the region+adjacency instance given
--- the current puzzle's fixed cells, using MRV cell ordering. Returns
--- (solutions_found, exhausted); exhausted=true means node_budget was hit
--- before the search concluded, so the count isn't proof. Mirrors
--- sudokukiller.koplugin/board.lua's countCageSolutions.
-local NODE_BUDGET_UNIQUENESS = 200000
-
-local function countSolutions(puzzle, cage_id, cages, n, limit, node_budget)
-    local grid = {}
-    for r = 1, n do
-        grid[r] = {}
-        for c = 1, n do grid[r][c] = puzzle[r][c] end
-    end
-
-    local solutions, nodes, exhausted = 0, 0, false
-
-    local function isValid(r, c, v)
-        local id = cage_id[r][c]
-        local cage_size = cages[id].size
-        if v > cage_size then return false end
-        for _, cell in ipairs(cages[id].cells) do
-            local cr, cc = cell[1], cell[2]
-            if not (cr == r and cc == c) and grid[cr][cc] == v then return false end
-        end
-        for _, d in ipairs(DIR8) do
-            local nr, nc = r + d[1], c + d[2]
-            if inBounds(nr, nc, n) and grid[nr][nc] == v then return false end
-        end
-        return true
-    end
-
-    local empties = {}
-    for r = 1, n do for c = 1, n do if grid[r][c] == 0 then empties[#empties + 1] = { r = r, c = c } end end end
-
-    local function candidatesFor(r, c)
-        local cage_size = cages[cage_id[r][c]].size
-        local cands = {}
-        for v = 1, cage_size do if isValid(r, c, v) then cands[#cands + 1] = v end end
-        return cands
-    end
-
-    local function search(depth)
-        if solutions >= limit or exhausted then return end
-        nodes = nodes + 1
-        if nodes > node_budget then exhausted = true; return end
-        if depth > #empties then solutions = solutions + 1; return end
-        local best_idx, best_cands, best_len = nil, nil, 1000
-        for i, cell in ipairs(empties) do
-            if grid[cell.r][cell.c] == 0 then
-                local cands = candidatesFor(cell.r, cell.c)
-                if #cands < best_len then
-                    best_len, best_cands, best_idx = #cands, cands, i
-                    if best_len <= 1 then break end
-                end
-            end
-        end
-        if best_idx == nil then solutions = solutions + 1; return end
-        if best_len == 0 then return end
-        local cell = empties[best_idx]
-        for _, v in ipairs(best_cands) do
-            grid[cell.r][cell.c] = v
-            search(depth + 1)
-            grid[cell.r][cell.c] = 0
-            if solutions >= limit or exhausted then return end
-        end
-    end
-    search(1)
-    return solutions, exhausted
-end
-
-local function removeClues(solution, cage_id, cages, n, difficulty)
-    local keep_ratio
-    if     difficulty == "easy"   then keep_ratio = 0.55
-    elseif difficulty == "hard"   then keep_ratio = 0.20
-    else                               keep_ratio = 0.35
-    end
-
-    local puzzle = emptyGrid(n, n, 0)
-    for r = 1, n do
-        for c = 1, n do puzzle[r][c] = solution[r][c] end
-    end
-
-    -- Dig cells one at a time (like sudoku-common's hole-digging),
-    -- verifying with countSolutions after each tentative removal and
-    -- putting the cell back if that broke uniqueness -- the old "just
-    -- remove a fraction of cells randomly" approach never checked this
-    -- (see docs/generator_robustness_audit.md's Tier 2 table: measured
-    -- severe ambiguity, only Easy ever produced a unique puzzle, and
-    -- rarely).
-    local removable = {}
-    for r = 1, n do
-        for c = 1, n do removable[#removable + 1] = {r, c} end
-    end
-    shuffle(removable)
-
-    local total      = n * n
-    local target_remove = total - math.floor(total * keep_ratio)
-    local removed = 0
-    for _, cell in ipairs(removable) do
-        if removed >= target_remove then break end
-        local r, c = cell[1], cell[2]
-        local saved = puzzle[r][c]
-        puzzle[r][c] = 0
-        local solutions, exhausted = countSolutions(puzzle, cage_id, cages, n, 2, NODE_BUDGET_UNIQUENESS)
-        if not exhausted and solutions == 1 then
-            removed = removed + 1
-        else
-            puzzle[r][c] = saved
-        end
-    end
-    return puzzle
-end
-
--- ---------------------------------------------------------------------------
 -- SuguruBoard
 -- ---------------------------------------------------------------------------
 
@@ -313,37 +71,50 @@ function SuguruBoard:new(opts)
         selected   = nil,
         undo       = UndoStack:new{ max_size = 500 },
     }, self)
-    obj:generate()
+    -- A caller about to load() a saved game, or to generate() at a chosen
+    -- difficulty, passes no_generate so the grid isn't built for nothing.
+    if not opts.no_generate then obj:generate() end
     return obj
 end
 
 function SuguruBoard:generate(diff)
     self.difficulty = diff or self.difficulty
     local n         = self.n
-    -- Each attempt is a cheap constructive build (no backtracking search),
-    -- so this can afford to be a large budget: measured 0/40 fallback at
-    -- n=6 (the hardest supported size) with this cap, worst case ~1.9s.
-    local MAX_ATTEMPTS = 100000
+    local game      = Logic.generate(n, self.difficulty, math.random)
 
-    for _ = 1, MAX_ATTEMPTS do
-        local grid, cage_id, cages = tryGenerateCagesAndValues(n)
-        if grid then
-            self.cage_id  = cage_id
-            self.cages    = cages
-            self.solution = grid
-            self.puzzle   = removeClues(grid, cage_id, cages, n, self.difficulty)
-            self.user     = emptyGrid(n, n, 0)
-            self.wrong    = emptyGrid(n, n, false)
-            for r = 1, n do
-                for c = 1, n do
-                    self.user[r][c] = self.puzzle[r][c]
+    if game then
+        local cage_id  = emptyGrid(n, n, 0)
+        local solution = emptyGrid(n, n, 0)
+        local puzzle   = emptyGrid(n, n, 0)
+        local user     = emptyGrid(n, n, 0)
+        local cages    = {}
+        for r = 1, n do
+            for c = 1, n do
+                local i  = (r - 1) * n + c
+                local id = game.region[i]
+                cage_id[r][c]  = id
+                solution[r][c] = game.solution[i]
+                puzzle[r][c]   = game.puzzle[i]
+                user[r][c]     = game.puzzle[i]
+                local cage = cages[id]
+                if not cage then
+                    cage = { cells = {}, size = 0 }
+                    cages[id] = cage
                 end
+                cage.size = cage.size + 1
+                cage.cells[cage.size] = {r, c}
             end
-            self.won      = false
-            self.selected = nil
-            self.undo:clear()
-            return
         end
+        self.cage_id  = cage_id
+        self.cages    = cages
+        self.solution = solution
+        self.puzzle   = puzzle
+        self.user     = user
+        self.wrong    = emptyGrid(n, n, false)
+        self.won      = false
+        self.selected = nil
+        self.undo:clear()
+        return
     end
 
     -- Fallback: single-cell cages, all value 1

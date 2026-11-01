@@ -54,7 +54,7 @@ function SuguruScreen:init()
     local state = self.plugin:loadState()
     local n     = self.plugin:getSetting("grid_n", SuguruBoard.DEFAULT_N)
     local diff  = self.plugin:getSetting("difficulty", "medium")
-    self.board  = SuguruBoard:new{ n = n, difficulty = diff }
+    self.board  = SuguruBoard:new{ n = n, difficulty = diff, no_generate = true }
     if not self.board:load(state) then
         self.board:generate(diff)
     end
@@ -201,7 +201,7 @@ end
 function SuguruScreen:onNewGame()
     local diff = self.plugin:getSetting("difficulty", "medium")
     local n    = self.plugin:getSetting("grid_n", SuguruBoard.DEFAULT_N)
-    self.board  = SuguruBoard:new{ n = n, difficulty = diff }
+    self.board  = SuguruBoard:new{ n = n, difficulty = diff, no_generate = true }
     self.board:generate(diff)
     self.selected = nil
     self.plugin:saveState(self.board:serialize())

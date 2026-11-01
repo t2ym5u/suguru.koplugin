@@ -100,6 +100,68 @@ describe("SuguruBoard", function()
         end)
     end)
 
+    describe("deduction", function()
+        local Logic = require("suguru_logic")
+
+        local function flat(grid, n)
+            local out = {}
+            for r = 1, n do
+                for c = 1, n do out[(r - 1) * n + c] = grid[r][c] end
+            end
+            return out
+        end
+
+        local function topology(b)
+            return Logic.buildTopology(b.n, flat(b.cage_id, b.n))
+        end
+
+        it("every puzzle can be completed without guessing, at every size and level", function()
+            for _, n in ipairs(Board.SIZES) do
+                for _, diff in ipairs({ "easy", "medium", "hard" }) do
+                    for k = 1, 5 do
+                        math.randomseed(n * 1000 + k)
+                        local b = Board:new{ n = n, difficulty = diff }
+                        assert.are.equal(n, b.n)
+                        local T = topology(b)
+                        local rules = (diff == "hard") and "witness" or "singles"
+                        local done, val = Logic.logicSolve(T, flat(b.puzzle, n), rules)
+                        assert.is_true(done, ("%dx%d %s needs guessing"):format(n, n, diff))
+                        local sol = flat(b.solution, n)
+                        for i = 1, n * n do
+                            assert.are.equal(sol[i], val[i])
+                        end
+                    end
+                end
+            end
+        end)
+
+        it("hard puzzles need more than the basic rules", function()
+            for _, n in ipairs(Board.SIZES) do
+                math.randomseed(n * 31)
+                local b = Board:new{ n = n, difficulty = "hard" }
+                assert.is_false((Logic.logicSolve(topology(b), flat(b.puzzle, n), "singles")))
+            end
+        end)
+
+        it("the same seed gives the same puzzle (Daily Challenge)", function()
+            local function build()
+                math.randomseed(20261101)
+                local b = Board:new{ n = 6, difficulty = "medium", no_generate = true }
+                b:generate()
+                return table.concat(flat(b.cage_id, 6), ",") .. "|" .. table.concat(flat(b.puzzle, 6), ",")
+            end
+            assert.are.equal(build(), build())
+        end)
+
+        it("no_generate leaves the random sequence untouched", function()
+            math.randomseed(7)
+            local expected = math.random(1000000)
+            math.randomseed(7)
+            Board:new{ n = 6, no_generate = true }
+            assert.are.equal(expected, math.random(1000000))
+        end)
+    end)
+
     describe("setCell / eraseCell / undoMove", function()
         it("setCell rejects a given (puzzle) cell", function()
             local b = newBoard(6)

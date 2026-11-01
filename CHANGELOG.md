@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- Every puzzle can now be solved by deduction, without guessing. Difficulty is
+  now the reasoning a puzzle needs, not only how many clues it keeps: Easy and
+  Medium need only the basic rules, Hard needs reasoning about a whole region.
+- Fewer single-cell regions, which only gave away free cells.
+
+### Added
+- 7×7 and 8×8 grids.
+
+### Fixed
+- A grid was generated twice for each new game, and once for nothing when
+  resuming a saved game.
+
 ## [1.4.0] - 2026-10-30
 
 ### Added
