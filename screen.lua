@@ -19,6 +19,7 @@ local T               = require("ffi/util").template
 
 local ScreenBase          = require("screen_base")
 local MenuHelper          = require("menu_helper")
+local GenProgress         = require("gen_progress")
 local SuguruBoard         = lrequire("board")
 local SuguruBoardWidget   = lrequire("board_widget")
 
@@ -54,9 +55,9 @@ function SuguruScreen:init()
     local state = self.plugin:loadState()
     local n     = self.plugin:getSetting("grid_n", SuguruBoard.DEFAULT_N)
     local diff  = self.plugin:getSetting("difficulty", "medium")
-    self.board  = SuguruBoard:new{ n = n, difficulty = diff }
+    self.board  = SuguruBoard:new{ n = n, difficulty = diff, empty = true }
     if not self.board:load(state) then
-        self.board:generate(diff)
+        GenProgress.run(function(on_progress) self.board:generate(diff, on_progress) end)
     end
     self.selected = nil
     ScreenBase.init(self)
@@ -201,8 +202,8 @@ end
 function SuguruScreen:onNewGame()
     local diff = self.plugin:getSetting("difficulty", "medium")
     local n    = self.plugin:getSetting("grid_n", SuguruBoard.DEFAULT_N)
-    self.board  = SuguruBoard:new{ n = n, difficulty = diff }
-    self.board:generate(diff)
+    self.board  = SuguruBoard:new{ n = n, difficulty = diff, empty = true }
+    GenProgress.run(function(on_progress) self.board:generate(diff, on_progress) end)
     self.selected = nil
     self.plugin:saveState(self.board:serialize())
     self:buildLayout()

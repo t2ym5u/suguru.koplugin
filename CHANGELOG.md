@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2026-11-04
+
+### Changed
+- Much faster 6×6 puzzles: up to 0.9 s on a desktop (about 20 s on a Kobo)
+  down to under 0.04 s. A 6×6 grid has room for 9 cages at most, so the cage
+  builder now rebuilds just the cages around a cell it got stuck on instead
+  of starting the whole grid over (it used to take thousands of restarts).
+  Puzzles are new, with the same look (about 9 cages, mostly of 4-5 cells).
+- Opening the game no longer builds a puzzle it then throws away, and New
+  game builds one puzzle instead of two.
+- A "Generating puzzle…" progress bar shows when a puzzle takes more than a
+  moment. Needs game-common 1.12.0.
+
 ## [1.4.3] - 2026-11-03
 
 ### Changed
