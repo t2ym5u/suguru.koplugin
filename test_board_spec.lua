@@ -100,6 +100,116 @@ describe("SuguruBoard", function()
         end)
     end)
 
+    -- 1.5.0: the cage builder repairs a stuck patch locally instead of
+    -- restarting the whole board (6x6 took up to ~0.6 s on a desktop).
+    -- Guard what it must still deliver on many seeds: connected cages of
+    -- 1..size, no equal 8-neighbours, a puzzle with exactly one solution
+    -- (counted by a plain backtracker independent of board.lua's), fast.
+    describe("generator over many seeds", function()
+        local DIR4 = { {-1,0},{1,0},{0,-1},{0,1} }
+
+        local function countSolutions(b, limit)
+            local n, g = b.n, {}
+            for r = 1, n do
+                g[r] = {}
+                for c = 1, n do g[r][c] = b.puzzle[r][c] end
+            end
+            local count = 0
+            local function ok(r, c, v)
+                for dr = -1, 1 do
+                    for dc = -1, 1 do
+                        local nr, nc = r + dr, c + dc
+                        if (dr ~= 0 or dc ~= 0) and nr >= 1 and nr <= n and nc >= 1 and nc <= n
+                                and g[nr][nc] == v then
+                            return false
+                        end
+                    end
+                end
+                for _, cell in ipairs(b.cages[b.cage_id[r][c]].cells) do
+                    if g[cell[1]][cell[2]] == v then return false end
+                end
+                return true
+            end
+            local function rec(k)
+                if count >= limit then return end
+                if k > n * n then count = count + 1; return end
+                local r, c = math.floor((k - 1) / n) + 1, (k - 1) % n + 1
+                if g[r][c] ~= 0 then return rec(k + 1) end
+                for v = 1, b.cages[b.cage_id[r][c]].size do
+                    if ok(r, c, v) then
+                        g[r][c] = v
+                        rec(k + 1)
+                        g[r][c] = 0
+                    end
+                end
+            end
+            rec(1)
+            return count
+        end
+
+        it("builds valid, uniquely solvable puzzles quickly at every size and difficulty", function()
+            for _, n in ipairs(Board.SIZES) do
+                for _, diff in ipairs({ "easy", "medium", "hard" }) do
+                    local worst = 0
+                    for seed = 1, 15 do
+                        math.randomseed(seed * 7919 + n)
+                        local t0 = os.clock()
+                        local b = Board:new{ n = n, difficulty = diff }
+                        worst = math.max(worst, os.clock() - t0)
+                        assert.are.equal(n, b.n)
+                        local cells_seen = 0
+                        for id, cage in ipairs(b.cages) do
+                            local vals, in_cage = {}, {}
+                            for _, cell in ipairs(cage.cells) do
+                                assert.are.equal(id, b.cage_id[cell[1]][cell[2]])
+                                local v = b.solution[cell[1]][cell[2]]
+                                assert.is_true(v >= 1 and v <= cage.size)
+                                assert.is_nil(vals[v])
+                                vals[v] = true
+                                in_cage[cell[1] * 100 + cell[2]] = true
+                                cells_seen = cells_seen + 1
+                            end
+                            -- connected (orthogonally)
+                            local first = cage.cells[1]
+                            local stack, seen, reached = { first }, { [first[1] * 100 + first[2]] = true }, 1
+                            while #stack > 0 do
+                                local cur = table.remove(stack)
+                                for _, d in ipairs(DIR4) do
+                                    local key = (cur[1] + d[1]) * 100 + cur[2] + d[2]
+                                    if in_cage[key] and not seen[key] then
+                                        seen[key] = true
+                                        reached = reached + 1
+                                        stack[#stack + 1] = { cur[1] + d[1], cur[2] + d[2] }
+                                    end
+                                end
+                            end
+                            assert.are.equal(#cage.cells, reached)
+                        end
+                        assert.are.equal(n * n, cells_seen)
+                        for r = 1, n do
+                            for c = 1, n do
+                                for dr = -1, 1 do
+                                    for dc = -1, 1 do
+                                        local nr, nc = r + dr, c + dc
+                                        if (dr ~= 0 or dc ~= 0) and nr >= 1 and nr <= n and nc >= 1 and nc <= n then
+                                            assert.are_not.equal(b.solution[r][c], b.solution[nr][nc])
+                                        end
+                                    end
+                                end
+                                local p = b.puzzle[r][c]
+                                assert.is_true(p == 0 or p == b.solution[r][c])
+                            end
+                        end
+                        assert.are.equal(1, countSolutions(b, 2),
+                            ("n=%d %s seed %d is not uniquely solvable"):format(n, diff, seed))
+                    end
+                    -- generous: ~0.05 s on a desktop
+                    assert.is_true(worst < 1.0, ("n=%d %s took %.2f s"):format(n, diff, worst))
+                end
+            end
+        end)
+    end)
+
     describe("setCell / eraseCell / undoMove", function()
         it("setCell rejects a given (puzzle) cell", function()
             local b = newBoard(6)

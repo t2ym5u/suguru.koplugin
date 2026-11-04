@@ -38,19 +38,140 @@ end
 -- Build cages AND assign their values in the same pass, instead of
 -- generating a blind random cage layout and hoping a separate solve() can
 -- fill it (measured: at n=6 that needed tens of thousands of attempts to
--- find a satisfiable layout by chance). Each new cage grows one cell at a
--- time, immediately assigning the next value and checking it against every
--- value already placed on the board; a cage just stops growing early if no
--- neighbouring cell can validly take the next value. Leftover unassigned
--- cells (surrounded before they got a turn) are patched in a repair pass:
--- extend an adjacent cage by one more value, or start a fresh size-1 cage;
--- returns nil only if neither works anywhere, so the caller can retry
--- cheaply (no search involved, so a high retry cap is affordable).
+-- find a satisfiable layout by chance). Each new cage first grows its shape
+-- over free cells, then looks for an order of 1..size that fits next to the
+-- values already on the board, dropping its last cell until one does.
+-- Leftover free cells are patched in a repair pass: join an adjacent cage
+-- (its values re-ordered to fit), or become a size-1 cage.
+--
+-- A 6x6 board is tight: every cage holds one 1 and no two 1s may touch, so
+-- there is room for 9 cages at most, nearly all of size 4-5. The old
+-- builder restarted the whole board whenever the repair pass got stuck,
+-- which took thousands of restarts (up to ~0.6 s on a desktop, ~15 s on a
+-- Kobo). Now a stuck cell only clears the cages around it and that patch
+-- is rebuilt, up to LOCAL_RETRIES times before a full restart.
+local LOCAL_RETRIES = 60
+
 local function tryGenerateCagesAndValues(n)
     local grid    = emptyGrid(n, n, 0)
     local cage_id = emptyGrid(n, n, 0)
     local cages   = {}
     local next_id = 0
+
+    -- Gives the cells of `shape` the values 1..#shape in some order that
+    -- clashes with no value already on the board (cells of one cage can't
+    -- clash with each other: their values are all different). Plain
+    -- backtracking, values tried in increasing order; at most 5! orders.
+    -- Leaves the shape's cells at 0 when no order fits.
+    local function assignValues(shape)
+        local k = #shape
+        local used = {}
+        local function place(i)
+            if i > k then return true end
+            local rc = shape[i]
+            for v = 1, k do
+                if not used[v] and isValidGlobal(grid, n, rc[1], rc[2], v) then
+                    used[v] = true
+                    grid[rc[1]][rc[2]] = v
+                    if place(i + 1) then return true end
+                    grid[rc[1]][rc[2]] = 0
+                    used[v] = false
+                end
+            end
+            return false
+        end
+        return place(1)
+    end
+
+    local function growCage(r, c)
+        -- Prefer sizes 2-3; allow 1-MAX_CAGE
+        local weights = {1, 3, 3, 2, 1}
+        local total_w = 0
+        for _, w in ipairs(weights) do total_w = total_w + w end
+        local rng = math.random(total_w)
+        local acc, target = 0, 1
+        for sz, w in ipairs(weights) do
+            acc = acc + w
+            if rng <= acc then target = sz; break end
+        end
+
+        local shape, in_shape = { {r, c} }, { [r * 100 + c] = true }
+        while #shape < target do
+            local candidates = {}
+            for _, rc in ipairs(shape) do
+                for _, d in ipairs(DIR4) do
+                    local nr, nc = rc[1] + d[1], rc[2] + d[2]
+                    if inBounds(nr, nc, n) and cage_id[nr][nc] == 0
+                            and not in_shape[nr * 100 + nc] then
+                        candidates[#candidates + 1] = {nr, nc}
+                    end
+                end
+            end
+            if #candidates == 0 then break end
+            local pick = candidates[math.random(#candidates)]
+            shape[#shape + 1] = pick
+            in_shape[pick[1] * 100 + pick[2]] = true
+        end
+
+        while #shape > 0 and not assignValues(shape) do
+            shape[#shape] = nil
+        end
+        if #shape > 0 then
+            next_id = next_id + 1
+            for _, rc in ipairs(shape) do cage_id[rc[1]][rc[2]] = next_id end
+            cages[next_id] = { cells = shape, size = #shape }
+        end
+    end
+
+    -- Repair: (r, c) joins an adjacent cage, re-ordering that cage's values
+    -- so the new cell fits, or becomes a size-1 cage. False if neither.
+    local function patchCell(r, c)
+        local tried = {}
+        for _, d in ipairs(DIR4) do
+            local nr, nc = r + d[1], c + d[2]
+            local id = inBounds(nr, nc, n) and cage_id[nr][nc] or 0
+            if id > 0 and not tried[id] and cages[id].size < MAX_CAGE then
+                tried[id] = true
+                local cage = cages[id]
+                local saved = {}
+                for i, rc in ipairs(cage.cells) do
+                    saved[i] = grid[rc[1]][rc[2]]
+                    grid[rc[1]][rc[2]] = 0
+                end
+                local shape = {}
+                for i, rc in ipairs(cage.cells) do shape[i] = rc end
+                shape[#shape + 1] = {r, c}
+                if assignValues(shape) then
+                    cage.cells = shape
+                    cage.size  = #shape
+                    cage_id[r][c] = id
+                    return true
+                end
+                for i, rc in ipairs(cage.cells) do grid[rc[1]][rc[2]] = saved[i] end
+            end
+        end
+        if isValidGlobal(grid, n, r, c, 1) then
+            next_id = next_id + 1
+            cage_id[r][c] = next_id
+            grid[r][c]    = 1
+            cages[next_id] = { cells = {{r, c}}, size = 1 }
+            return true
+        end
+        return false
+    end
+
+    -- Grows cages from the free cells of `order`, then patches what is
+    -- left. Returns the cell it got stuck on, or nil when the board is full.
+    local function fill(order)
+        for _, cell in ipairs(order) do
+            if cage_id[cell[1]][cell[2]] == 0 then growCage(cell[1], cell[2]) end
+        end
+        for r = 1, n do
+            for c = 1, n do
+                if cage_id[r][c] == 0 and not patchCell(r, c) then return r, c end
+            end
+        end
+    end
 
     local all_cells = {}
     for r = 1, n do
@@ -58,90 +179,49 @@ local function tryGenerateCagesAndValues(n)
     end
     shuffle(all_cells)
 
-    for _, cell in ipairs(all_cells) do
-        local r, c = cell[1], cell[2]
-        if cage_id[r][c] == 0 and isValidGlobal(grid, n, r, c, 1) then
-            next_id = next_id + 1
-            local id = next_id
-            cage_id[r][c] = id
-            grid[r][c]    = 1
-            local cage = { cells = {{r, c}}, size = 1 }
-            cages[id] = cage
-
-            -- Prefer sizes 2-3; allow 1-MAX_CAGE
-            local weights = {1, 3, 3, 2, 1}
-            local total_w = 0
-            for _, w in ipairs(weights) do total_w = total_w + w end
-            local rng = math.random(total_w)
-            local acc, target = 0, 1
-            for sz, w in ipairs(weights) do
-                acc = acc + w
-                if rng <= acc then target = sz; break end
-            end
-
-            while cage.size < target do
-                local candidates = {}
-                for _, rc in ipairs(cage.cells) do
-                    for _, d in ipairs(DIR4) do
-                        local nr, nc = rc[1] + d[1], rc[2] + d[2]
-                        if inBounds(nr, nc, n) and cage_id[nr][nc] == 0 then
-                            local next_v = cage.size + 1
-                            if isValidGlobal(grid, n, nr, nc, next_v) then
-                                candidates[#candidates + 1] = {nr, nc}
-                            end
-                        end
+    local sr, sc = fill(all_cells)
+    local retries = 0
+    while sr do
+        retries = retries + 1
+        if retries > LOCAL_RETRIES then return nil end
+        -- Clear every cage that touches the stuck cell's 3x3 block, then
+        -- rebuild the free patch in a fresh random order.
+        for dr = -1, 1 do
+            for dc = -1, 1 do
+                local r, c = sr + dr, sc + dc
+                local id = inBounds(r, c, n) and cage_id[r][c] or 0
+                if id > 0 then
+                    for _, rc in ipairs(cages[id].cells) do
+                        cage_id[rc[1]][rc[2]] = 0
+                        grid[rc[1]][rc[2]]    = 0
                     end
+                    cages[id] = nil
                 end
-                if #candidates == 0 then break end
-                local pick = candidates[math.random(#candidates)]
-                cage.size = cage.size + 1
-                cage_id[pick[1]][pick[2]] = id
-                grid[pick[1]][pick[2]]    = cage.size
-                cage.cells[#cage.cells + 1] = pick
             end
         end
+        local free = {}
+        for r = 1, n do
+            for c = 1, n do
+                if cage_id[r][c] == 0 then free[#free + 1] = {r, c} end
+            end
+        end
+        shuffle(free)
+        sr, sc = fill(free)
     end
 
-    -- Repair pass: patch up any cells the main pass never reached.
+    -- Renumber the surviving cages 1..k in board order.
+    local renum, out = {}, {}
     for r = 1, n do
         for c = 1, n do
-            if cage_id[r][c] == 0 then
-                local joined, adj_ids = false, {}
-                for _, d in ipairs(DIR4) do
-                    local nr, nc = r + d[1], c + d[2]
-                    if inBounds(nr, nc, n) and cage_id[nr][nc] > 0 then
-                        adj_ids[cage_id[nr][nc]] = true
-                    end
-                end
-                for id in pairs(adj_ids) do
-                    local cage = cages[id]
-                    if cage.size < MAX_CAGE then
-                        local next_v = cage.size + 1
-                        if isValidGlobal(grid, n, r, c, next_v) then
-                            cage.size = next_v
-                            cage_id[r][c] = id
-                            grid[r][c]    = next_v
-                            cage.cells[#cage.cells + 1] = {r, c}
-                            joined = true
-                            break
-                        end
-                    end
-                end
-                if not joined then
-                    if isValidGlobal(grid, n, r, c, 1) then
-                        next_id = next_id + 1
-                        cage_id[r][c] = next_id
-                        grid[r][c]    = 1
-                        cages[next_id] = { cells = {{r, c}}, size = 1 }
-                    else
-                        return nil
-                    end
-                end
+            local id = cage_id[r][c]
+            if not renum[id] then
+                out[#out + 1] = cages[id]
+                renum[id] = #out
             end
+            cage_id[r][c] = renum[id]
         end
     end
-
-    return grid, cage_id, cages
+    return grid, cage_id, out
 end
 
 -- ---------------------------------------------------------------------------
@@ -248,7 +328,7 @@ local function countSolutions(puzzle, cage_id, cages, n, limit, node_budget)
     return solutions, exhausted
 end
 
-local function removeClues(solution, cage_id, cages, n, difficulty)
+local function removeClues(solution, cage_id, cages, n, difficulty, on_progress)
     local keep_ratio
     if     difficulty == "easy"   then keep_ratio = 0.55
     elseif difficulty == "hard"   then keep_ratio = 0.20
@@ -276,8 +356,9 @@ local function removeClues(solution, cage_id, cages, n, difficulty)
     local total      = n * n
     local target_remove = total - math.floor(total * keep_ratio)
     local removed = 0
-    for _, cell in ipairs(removable) do
+    for i, cell in ipairs(removable) do
         if removed >= target_remove then break end
+        if on_progress then on_progress(i / #removable) end
         local r, c = cell[1], cell[2]
         local saved = puzzle[r][c]
         puzzle[r][c] = 0
@@ -313,25 +394,31 @@ function SuguruBoard:new(opts)
         selected   = nil,
         undo       = UndoStack:new{ max_size = 500 },
     }, self)
-    obj:generate()
+    -- opts.empty: the caller loads a save or generates right after, so
+    -- skip the throwaway puzzle.
+    if not opts.empty then obj:generate() end
     return obj
 end
 
-function SuguruBoard:generate(diff)
+-- on_progress (optional): called with a 0..1 fraction as it goes.
+function SuguruBoard:generate(diff, on_progress)
     self.difficulty = diff or self.difficulty
     local n         = self.n
-    -- Each attempt is a cheap constructive build (no backtracking search),
-    -- so this can afford to be a large budget: measured 0/40 fallback at
-    -- n=6 (the hardest supported size) with this cap, worst case ~1.9s.
-    local MAX_ATTEMPTS = 100000
+    -- Each attempt is a constructive build with local repairs (no search
+    -- over the whole board); measured at n=6 (the hardest supported size)
+    -- over 2000 seeds: at most 10 attempts, so this cap is never
+    -- reached in practice.
+    local MAX_ATTEMPTS = 2000
 
-    for _ = 1, MAX_ATTEMPTS do
+    for attempt = 1, MAX_ATTEMPTS do
+        if on_progress then on_progress(0.3 * (1 - 1 / attempt)) end
         local grid, cage_id, cages = tryGenerateCagesAndValues(n)
         if grid then
             self.cage_id  = cage_id
             self.cages    = cages
             self.solution = grid
-            self.puzzle   = removeClues(grid, cage_id, cages, n, self.difficulty)
+            self.puzzle   = removeClues(grid, cage_id, cages, n, self.difficulty,
+                on_progress and function(f) on_progress(0.3 + 0.7 * f) end)
             self.user     = emptyGrid(n, n, 0)
             self.wrong    = emptyGrid(n, n, false)
             for r = 1, n do
