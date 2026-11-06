@@ -1,6 +1,7 @@
 local grid_utils = require("grid_utils")
 local UndoStack  = require("undo_stack")
 local Hint      = require("hint")
+local bit       = require("bit")
 
 local emptyGrid = grid_utils.emptyGrid
 local shuffle   = grid_utils.shuffle
@@ -263,7 +264,9 @@ end
 -- (solutions_found, exhausted); exhausted=true means node_budget was hit
 -- before the search concluded, so the count isn't proof. Mirrors
 -- sudokukiller.koplugin/board.lua's countCageSolutions.
-local NODE_BUDGET_UNIQUENESS = 200000
+-- Since 1.6.0 the generator digs with logicSolve (below), which proves
+-- uniqueness by itself; this counter stays as an independent check for
+-- the specs.
 
 local function countSolutions(puzzle, cage_id, cages, n, limit, node_budget)
     local grid = {}
@@ -328,48 +331,294 @@ local function countSolutions(puzzle, cage_id, cages, n, limit, node_budget)
     return solutions, exhausted
 end
 
-local function removeClues(solution, cage_id, cages, n, difficulty, on_progress)
-    local keep_ratio
-    if     difficulty == "easy"   then keep_ratio = 0.55
-    elseif difficulty == "hard"   then keep_ratio = 0.20
-    else                               keep_ratio = 0.35
+-- ---------------------------------------------------------------------------
+-- Human-style solver (1.6.0), used to grade and dig puzzles
+-- ---------------------------------------------------------------------------
+--
+-- Keeps the digits still possible in every cell (bit v-1 for digit v) and
+-- narrows them down without trial and error:
+--   tier 1  what a beginner does:
+--           - a placed digit is crossed out of its cage and of its 8
+--             neighbours;
+--           - a cell with one digit left takes it;
+--           - a digit with one place left in its cage goes there.
+--   tier 2  - "pointing": every place left for digit v in a cage touches
+--             the same outside cell, so that cell is not v;
+--           - pairs and triples inside a cage: two cells holding the same
+--             two digits (three cells, three digits) take them away from
+--             the rest of the cage, and two digits that only fit in the
+--             same two cells clear those cells of everything else.
+-- Tier 2 is only tried when tier 1 is stuck, and each tier-2 step counts:
+-- that count tells the levels apart. A puzzle it finishes has exactly one
+-- solution, since every step only follows from the rules.
+local POP, LOW, BIT = {}, {}, {}
+for v = 1, MAX_CAGE do BIT[v] = bit.lshift(1, v - 1) end
+for m = 0, BIT[MAX_CAGE] * 2 - 1 do
+    local k, lo = 0, 0
+    for v = 1, MAX_CAGE do
+        if bit.band(m, BIT[v]) ~= 0 then
+            k = k + 1
+            if lo == 0 then lo = v end
+        end
+    end
+    POP[m], LOW[m] = k, lo
+end
+
+-- The parts of a layout the solver needs, built once per layout: cell
+-- index (r-1)*n+c, each cage's cells, each cell's cage, neighbours, and
+-- row/column for quick adjacency tests.
+local function prepare(cage_id, cages, n)
+    local ctx = { n = n, N = n * n, units = {}, size = {}, cage_of = {}, nbr = {}, row = {}, col = {} }
+    for id, cage in ipairs(cages) do
+        local u = {}
+        for k, rc in ipairs(cage.cells) do u[k] = (rc[1] - 1) * n + rc[2] end
+        ctx.units[id] = u
+        ctx.size[id] = cage.size
+    end
+    for r = 1, n do
+        for c = 1, n do
+            local i = (r - 1) * n + c
+            ctx.cage_of[i] = cage_id[r][c]
+            ctx.row[i], ctx.col[i] = r, c
+            local list = {}
+            for _, d in ipairs(DIR8) do
+                local nr, nc = r + d[1], c + d[2]
+                if inBounds(nr, nc, n) then list[#list + 1] = (nr - 1) * n + nc end
+            end
+            ctx.nbr[i] = list
+        end
+    end
+    return ctx
+end
+
+-- puzzle: grid of digits (0 = empty). Returns solved, t2_steps, values
+-- (grid, 0 where still open).
+local function solveCtx(puzzle, ctx, max_tier)
+    local n, N = ctx.n, ctx.N
+    local units, size, cage_of, nbr, row, col = ctx.units, ctx.size, ctx.cage_of, ctx.nbr, ctx.row, ctx.col
+    local nunits = #units
+    local band, bnot, bor = bit.band, bit.bnot, bit.bor
+    local dom = {}
+    for r = 1, n do
+        for c = 1, n do
+            local i = (r - 1) * n + c
+            local v = puzzle[r][c]
+            dom[i] = v > 0 and BIT[v] or BIT[size[cage_of[i]]] * 2 - 1
+        end
+    end
+    local done, bad = {}, false
+    local function removeMask(j, m)
+        local old = dom[j]
+        local new = band(old, bnot(m))
+        if new ~= old then
+            dom[j] = new
+            if new == 0 then bad = true end
+            return true
+        end
+        return false
     end
 
+    local function tier1()
+        local prog = false
+        for i = 1, N do
+            local m = dom[i]
+            if not done[i] and POP[m] == 1 then
+                done[i] = true
+                prog = true
+                local u = units[cage_of[i]]
+                for k = 1, #u do
+                    local j = u[k]
+                    if j ~= i then removeMask(j, m) end
+                end
+                local nb = nbr[i]
+                for k = 1, #nb do removeMask(nb[k], m) end
+            end
+        end
+        if prog or bad then return prog end
+        for id = 1, nunits do
+            local u = units[id]
+            for v = 1, size[id] do
+                local b = BIT[v]
+                local cnt, last = 0, nil
+                for k = 1, #u do
+                    if band(dom[u[k]], b) ~= 0 then cnt = cnt + 1; last = u[k] end
+                end
+                if cnt == 0 then bad = true; return false end
+                if cnt == 1 and dom[last] ~= b then dom[last] = b; return true end
+            end
+        end
+        return false
+    end
+
+    local function adjacent(x, p)
+        local dr, dc = row[x] - row[p], col[x] - col[p]
+        return dr >= -1 and dr <= 1 and dc >= -1 and dc <= 1 and x ~= p
+    end
+
+    local places = {}
+    local function tier2()
+        -- Pointing.
+        for id = 1, nunits do
+            local u = units[id]
+            for v = 1, size[id] do
+                local b = BIT[v]
+                local np, placed = 0, false
+                for k = 1, #u do
+                    local j = u[k]
+                    local m = dom[j]
+                    if band(m, b) ~= 0 then
+                        if m == b then placed = true end
+                        np = np + 1
+                        places[np] = j
+                    end
+                end
+                if not placed and np >= 2 then
+                    local ch = false
+                    local nb = nbr[places[1]]
+                    for k = 1, #nb do
+                        local x = nb[k]
+                        if cage_of[x] ~= id and band(dom[x], b) ~= 0 then
+                            local all = true
+                            for q = 2, np do
+                                if not adjacent(x, places[q]) then all = false; break end
+                            end
+                            if all then removeMask(x, b); ch = true end
+                        end
+                    end
+                    if ch then return true end
+                end
+            end
+        end
+        -- Subsets inside a cage.
+        for id = 1, nunits do
+            local u = units[id]
+            local nu = #u
+            if nu >= 3 then
+                for x = 1, nu do
+                    local mx = dom[u[x]]
+                    if POP[mx] > 1 then
+                        for y = x + 1, nu do
+                            local my = dom[u[y]]
+                            if POP[my] > 1 then
+                                local m2 = bor(mx, my)
+                                if POP[m2] == 2 then
+                                    local ch = false
+                                    for z = 1, nu do
+                                        if z ~= x and z ~= y and removeMask(u[z], m2) then ch = true end
+                                    end
+                                    if ch then return true end
+                                elseif POP[m2] == 3 then
+                                    for w = y + 1, nu do
+                                        local mw = dom[u[w]]
+                                        if POP[mw] > 1 and POP[bor(m2, mw)] == 3 then
+                                            local m3 = bor(m2, mw)
+                                            local ch = false
+                                            for z = 1, nu do
+                                                if z ~= x and z ~= y and z ~= w and removeMask(u[z], m3) then ch = true end
+                                            end
+                                            if ch then return true end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+                -- Hidden pairs.
+                local sz = size[id]
+                for v = 1, sz do
+                    for w = v + 1, sz do
+                        local bm = bor(BIT[v], BIT[w])
+                        local hits, h1, h2, both = 0, nil, nil, true
+                        for k = 1, nu do
+                            local m = band(dom[u[k]], bm)
+                            if m ~= 0 then
+                                hits = hits + 1
+                                if hits == 1 then h1 = u[k] else h2 = u[k] end
+                                if m ~= bm then both = false end
+                            end
+                        end
+                        if hits == 2 and both and (dom[h1] ~= bm or dom[h2] ~= bm) then
+                            dom[h1], dom[h2] = bm, bm
+                            return true
+                        end
+                    end
+                end
+            end
+        end
+        return false
+    end
+
+    local t2 = 0
+    while not bad do
+        if not tier1() then
+            if bad then break end
+            local solved = true
+            for i = 1, N do if POP[dom[i]] ~= 1 then solved = false; break end end
+            if solved then break end
+            if max_tier >= 2 and tier2() then t2 = t2 + 1 else break end
+        end
+    end
+    local values, solved = {}, not bad
+    for r = 1, n do
+        values[r] = {}
+        for c = 1, n do
+            local m = dom[(r - 1) * n + c]
+            if POP[m] == 1 then values[r][c] = LOW[m] else values[r][c] = 0; solved = false end
+        end
+    end
+    return solved, t2, values
+end
+
+local function logicSolve(puzzle, cage_id, cages, n, max_tier)
+    return solveCtx(puzzle, prepare(cage_id, cages, n), max_tier)
+end
+
+-- What each level asks for (1.6.0). Before, digging only checked that the
+-- answer stayed unique and levels differed only by how many digits were
+-- left: some Medium/Hard puzzles (6x6 Hard: 7%) could only be finished by
+-- trial and error.
+--   tier          the hardest reasoning the puzzle may need (see logicSolve)
+--   min_given     never show fewer digits than this fraction of the grid
+--   min_t2/max_t2 how many tier-2 steps the solution needs
+-- Easy: tier 1 only. Medium: a few tier-2 steps. Hard: fewer digits, more
+-- tier-2 steps. Never trial and error.
+local LEVELS = {
+    easy   = function(n) return { tier = 1, min_given = 0.40, min_t2 = 0, max_t2 = 0 } end,
+    medium = function(n) return { tier = 2, min_given = 0.25, min_t2 = 1, max_t2 = 3 } end,
+    hard   = function(n) return { tier = 2, min_given = 0.0, min_t2 = 3, max_t2 = math.huge } end,
+}
+
+-- Digs one candidate: digits hidden in a random order, each one only if
+-- the solver at the level's tier still finishes the grid. Returns the
+-- puzzle and its tier-2 step count.
+local function removeClues(solution, cage_id, cages, n, level, on_progress)
     local puzzle = emptyGrid(n, n, 0)
     for r = 1, n do
         for c = 1, n do puzzle[r][c] = solution[r][c] end
     end
-
-    -- Dig cells one at a time (like sudoku-common's hole-digging),
-    -- verifying with countSolutions after each tentative removal and
-    -- putting the cell back if that broke uniqueness -- the old "just
-    -- remove a fraction of cells randomly" approach never checked this
-    -- (see docs/generator_robustness_audit.md's Tier 2 table: measured
-    -- severe ambiguity, only Easy ever produced a unique puzzle, and
-    -- rarely).
     local removable = {}
     for r = 1, n do
         for c = 1, n do removable[#removable + 1] = {r, c} end
     end
     shuffle(removable)
-
-    local total      = n * n
-    local target_remove = total - math.floor(total * keep_ratio)
-    local removed = 0
+    local total = n * n
+    local floor_given = math.ceil(total * level.min_given)
+    local shown = total
+    local ctx = prepare(cage_id, cages, n)
     for i, cell in ipairs(removable) do
-        if removed >= target_remove then break end
-        if on_progress then on_progress(i / #removable) end
+        if shown <= floor_given then break end
+        if on_progress then on_progress(i / total) end
         local r, c = cell[1], cell[2]
-        local saved = puzzle[r][c]
         puzzle[r][c] = 0
-        local solutions, exhausted = countSolutions(puzzle, cage_id, cages, n, 2, NODE_BUDGET_UNIQUENESS)
-        if not exhausted and solutions == 1 then
-            removed = removed + 1
+        if solveCtx(puzzle, ctx, level.tier) then
+            shown = shown - 1
         else
-            puzzle[r][c] = saved
+            puzzle[r][c] = solution[r][c]
         end
     end
-    return puzzle
+    local _, t2 = solveCtx(puzzle, ctx, 2)
+    return puzzle, t2
 end
 
 -- ---------------------------------------------------------------------------
@@ -410,27 +659,56 @@ function SuguruBoard:generate(diff, on_progress)
     -- reached in practice.
     local MAX_ATTEMPTS = 2000
 
+    local level = (LEVELS[self.difficulty] or LEVELS.medium)(n)
+    -- Up to CANDIDATES dug puzzles until one needs a number of tier-2
+    -- steps in the level's range; otherwise the closest one. Each layout
+    -- is dug in up to ORDERS different random orders before a new one is
+    -- built (building a layout costs more than digging it). Every
+    -- candidate is finished by logicSolve without trial, so any of them is
+    -- a valid, unique puzzle. Bounded by attempt counts only: same seed,
+    -- same puzzle on every device.
+    local candidates = SuguruBoard.CANDIDATES[n] or 6
+    local orders = SuguruBoard.ORDERS[n] or 4
+    local best, best_miss, made = nil, nil, 0
     for attempt = 1, MAX_ATTEMPTS do
-        if on_progress then on_progress(0.3 * (1 - 1 / attempt)) end
         local grid, cage_id, cages = tryGenerateCagesAndValues(n)
         if grid then
-            self.cage_id  = cage_id
-            self.cages    = cages
-            self.solution = grid
-            self.puzzle   = removeClues(grid, cage_id, cages, n, self.difficulty,
-                on_progress and function(f) on_progress(0.3 + 0.7 * f) end)
-            self.user     = emptyGrid(n, n, 0)
-            self.wrong    = emptyGrid(n, n, false)
-            for r = 1, n do
-                for c = 1, n do
-                    self.user[r][c] = self.puzzle[r][c]
+            for _ = 1, orders do
+                made = made + 1
+                local puzzle, t2 = removeClues(grid, cage_id, cages, n, level,
+                    on_progress and function(f) on_progress((made - 1 + f) / candidates) end)
+                local miss = 0
+                if t2 < level.min_t2 then miss = level.min_t2 - t2
+                elseif t2 > level.max_t2 then miss = t2 - level.max_t2 end
+                if not best or miss < best_miss then
+                    best = { grid = grid, cage_id = cage_id, cages = cages,
+                             puzzle = puzzle, t2 = t2, attempt = made }
+                    best_miss = miss
                 end
+                if miss == 0 or made >= candidates then break end
             end
-            self.won      = false
-            self.selected = nil
-            self.undo:clear()
-            return
+            if best_miss == 0 or made >= candidates then break end
         end
+    end
+    if best then
+        self.cage_id  = best.cage_id
+        self.cages    = best.cages
+        self.solution = best.grid
+        self.puzzle   = best.puzzle
+        -- How the kept puzzle graded (not saved; read by the specs).
+        self.grade    = { t2 = best.t2, attempt = best.attempt }
+        self.user     = emptyGrid(n, n, 0)
+        self.wrong    = emptyGrid(n, n, false)
+        for r = 1, n do
+            for c = 1, n do
+                self.user[r][c] = self.puzzle[r][c]
+            end
+        end
+        self.won      = false
+        self.selected = nil
+        self.undo:clear()
+        if on_progress then on_progress(1) end
+        return
     end
 
     -- Fallback: single-cell cages, all value 1
@@ -617,5 +895,13 @@ end
 SuguruBoard.SIZES     = SIZES
 SuguruBoard.DEFAULT_N = DEFAULT_N
 SuguruBoard.MAX_CAGE  = MAX_CAGE
+SuguruBoard.LEVELS    = LEVELS
+-- Dug candidates per puzzle, by size, and dig orders per layout (see
+-- generate).
+SuguruBoard.CANDIDATES = { [5] = 24, [6] = 12 }
+SuguruBoard.ORDERS     = { [5] = 4, [6] = 12 }
+-- for the specs
+SuguruBoard._logicSolve     = logicSolve
+SuguruBoard._countSolutions = countSolutions
 
 return SuguruBoard

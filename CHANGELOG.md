@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.0] - 2026-11-05
+
+### Changed
+- Difficulty levels now really differ, and no puzzle needs guessing.
+  Before, levels only showed fewer digits, and digging only checked that
+  the answer stayed unique: some puzzles (6×6 Hard: 7%, 6×6 Medium: 2%)
+  could only be finished by trial and error, while many Medium ones
+  (5×5: 81%, 6×6: 50%) needed nothing beyond the basic rules.
+  Each puzzle is now graded by a human-style solver:
+  - Easy: the basic rules only (a placed digit rules itself out of its
+    cage and its neighbours; a cell with one digit left, or a digit with
+    one place left in its cage). About 40% of the cells shown.
+  - Medium: also needs a few harder steps: every place left for a digit
+    in a cage touches the same outside cell, so that cell can't hold it;
+    or pairs of digits locked into two cells of a cage. Fewer digits.
+  - Hard: fewer digits still and many more of those steps.
+- Puzzles differ from 1.5.x for the same seed (today's Daily Challenge
+  puzzle changes once after updating). Saved games still load.
+
 ## [1.5.2] - 2026-11-04
 
 ### Fixed
